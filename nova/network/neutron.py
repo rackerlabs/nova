@@ -277,6 +277,38 @@ def _ensure_no_port_binding_failure(port):
         raise exception.PortBindingFailed(port_id=port['id'])
 
 
+def _chunk_ids(ids):
+    """Split IDs into chunks small enough to filter a neutron listing on.
+
+    :param ids: A list of IDs, which may be empty.
+    :returns: A generator of lists of at most ``MAX_SEARCH_IDS`` IDs.
+    """
+    for i in range(0, len(ids), constants.MAX_SEARCH_IDS):
+        yield ids[i:i + constants.MAX_SEARCH_IDS]
+
+
+class _PrefetchedNeutronData:
+    """Neutron resources fetched in bulk to build the VIF models of ports.
+
+    :param networks: The networks of the ports, as returned to an admin.
+    :param subnets: The subnets of the fixed IPs of the ports.
+    :param dhcp_ports: The DHCP ports of the networks of ``subnets``.
+    :param floating_ips: The floating IPs associated with the ports.
+    """
+
+    def __init__(self, networks, subnets, dhcp_ports, floating_ips):
+        self.networks = {network['id']: network for network in networks}
+        self.subnets = {subnet['id']: subnet for subnet in subnets}
+        self.dhcp_ports = defaultdict(list)
+        for port in dhcp_ports:
+            self.dhcp_ports[port['network_id']].append(port)
+        self.floating_ips = defaultdict(list)
+        for floating_ip in floating_ips:
+            self.floating_ips[(floating_ip['port_id'],
+                               floating_ip['fixed_ip_address'])].append(
+                                   floating_ip)
+
+
 class API:
     """API for interacting with the neutron 2.x API."""
 
@@ -2219,7 +2251,31 @@ class API:
         if self.has_multi_provider_extension(client=neutron):
             network = neutron.show_network(net_id,
                                            fields='segments').get('network')
-            segments = network.get('segments', {})
+            if network.get('segments'):
+                return self._get_physnet_tunneled_info_from_network(
+                    net_id, network)
+
+        net = neutron.show_network(
+            net_id, fields=['provider:physical_network',
+                            'provider:network_type']).get('network')
+        return (net.get('provider:physical_network'),
+                net.get('provider:network_type') in constants.L3_NETWORK_TYPES)
+
+    @staticmethod
+    def _get_physnet_tunneled_info_from_network(net_id, network):
+        """Get the physnet name and tunneled status of a network.
+
+        :param net_id: The ID of the network.
+        :param network: The network as returned by neutron, with either its
+            segments or its provider attributes.
+
+        :return: A tuple containing the physnet name, if defined, and the
+            tunneled status of the network. If the network uses multiple
+            segments, the first segment that defines a physnet value will be
+            used for the physnet name.
+        """
+        segments = network.get('segments')
+        if segments:
             for net in segments:
                 # NOTE(vladikr): In general, "multi-segments" network is a
                 # combination of L2 segments. The current implementation
@@ -2236,16 +2292,13 @@ class API:
 
             # Raising here as at least one segment should
             # have a physical network provided.
-            if segments:
-                msg = (_("None of the segments of network %s provides a "
-                         "physical_network") % net_id)
-                raise exception.NovaException(message=msg)
+            msg = (_("None of the segments of network %s provides a "
+                     "physical_network") % net_id)
+            raise exception.NovaException(message=msg)
 
-        net = neutron.show_network(
-            net_id, fields=['provider:physical_network',
-                            'provider:network_type']).get('network')
-        return (net.get('provider:physical_network'),
-                net.get('provider:network_type') in constants.L3_NETWORK_TYPES)
+        return (network.get('provider:physical_network'),
+                network.get('provider:network_type') in
+                constants.L3_NETWORK_TYPES)
 
     @staticmethod
     def _get_trusted_mode_from_port(port):
@@ -3285,12 +3338,16 @@ class API:
             context, instance, migration.dest_compute, migration=migration,
             provider_mappings=provider_mappings)
 
-    def _nw_info_get_ips(self, client, port):
+    def _nw_info_get_ips(self, client, port, prefetched=None):
         network_IPs = []
         for fixed_ip in port['fixed_ips']:
             fixed = network_model.FixedIP(address=fixed_ip['ip_address'])
-            floats = self._get_floating_ips_by_fixed_and_port(
-                client, fixed_ip['ip_address'], port['id'])
+            if prefetched is None:
+                floats = self._get_floating_ips_by_fixed_and_port(
+                    client, fixed_ip['ip_address'], port['id'])
+            else:
+                floats = prefetched.floating_ips.get(
+                    (port['id'], fixed_ip['ip_address']), [])
             for ip in floats:
                 fip = network_model.IP(address=ip['floating_ip_address'],
                                        type='floating')
@@ -3298,14 +3355,17 @@ class API:
             network_IPs.append(fixed)
         return network_IPs
 
-    def _nw_info_get_subnets(self, context, port, network_IPs, client=None):
-        subnets = self._get_subnets_from_port(context, port, client)
+    def _nw_info_get_subnets(self, context, port, network_IPs, client=None,
+                             prefetched=None):
+        subnets = self._get_subnets_from_port(context, port, client,
+                                              prefetched)
         for subnet in subnets:
             subnet['ips'] = [fixed_ip for fixed_ip in network_IPs
                              if fixed_ip.is_in_subnet(subnet)]
         return subnets
 
-    def _nw_info_build_network(self, context, port, networks, subnets):
+    def _nw_info_build_network(self, context, port, networks, subnets,
+                               prefetched=None):
         # TODO(stephenfin): Pass in an existing admin client if available.
         neutron = get_client(context, admin=True)
         network_name = None
@@ -3359,8 +3419,13 @@ class API:
         if bridge is not None and vif_type != network_model.VIF_TYPE_DVS:
             bridge = bridge[:network_model.NIC_NAME_LEN]
 
-        physnet, tunneled = self._get_physnet_tunneled_info(
-            context, neutron, port['network_id'])
+        if (prefetched is not None and
+                port['network_id'] in prefetched.networks):
+            physnet, tunneled = self._get_physnet_tunneled_info_from_network(
+                port['network_id'], prefetched.networks[port['network_id']])
+        else:
+            physnet, tunneled = self._get_physnet_tunneled_info(
+                context, neutron, port['network_id'])
         network = network_model.Network(
             id=port['network_id'],
             bridge=bridge,
@@ -3390,7 +3455,7 @@ class API:
                 if vif.get('preserve_on_delete')]
 
     def _build_vif_model(self, context, client, current_neutron_port,
-                         networks, preexisting_port_ids):
+                         networks, preexisting_port_ids, prefetched=None):
         """Builds a ``nova.network.model.VIF`` object based on the parameters
         and current state of the port in Neutron.
 
@@ -3404,6 +3469,8 @@ class API:
         :param preexisting_port_ids: List of IDs of ports attached to a
             given server instance which Nova did not create and therefore
             should not delete when the port is detached from the server.
+        :param prefetched: Optional ``_PrefetchedNeutronData`` for the port,
+            used instead of looking up its details in neutron.
         :return: nova.network.model.VIF object which represents a port in the
             instance network info cache.
         """
@@ -3413,17 +3480,19 @@ class API:
             vif_active = True
 
         network_IPs = self._nw_info_get_ips(client,
-                                            current_neutron_port)
+                                            current_neutron_port,
+                                            prefetched)
         subnets = self._nw_info_get_subnets(context,
                                             current_neutron_port,
-                                            network_IPs, client)
+                                            network_IPs, client,
+                                            prefetched)
 
         devname = "tap" + current_neutron_port['id']
         devname = devname[:network_model.NIC_NAME_LEN]
 
         network, ovs_interfaceid = (
             self._nw_info_build_network(context, current_neutron_port,
-                                        networks, subnets))
+                                        networks, subnets, prefetched))
         preserve_on_delete = (current_neutron_port['id'] in
                               preexisting_port_ids)
 
@@ -3461,6 +3530,104 @@ class API:
                 old_vnic_type,
                 instance=instance
             )
+
+    def _populate_trunk_info(self, vif, current_neutron_port, context, client):
+        """Add the trunk subports of a port to its VIF model.
+
+        If the port is the parent port of a trunk, a VIF model is built for
+        each of the trunk's subports and added to the ``trunk_vifs`` of
+        ``vif``. The segmentation details of each subport are taken from the
+        parent port's ``trunk_details`` and stored as ``segmentation_id`` and
+        ``segmentation_type`` in the subport VIF's meta. Ports which are not
+        trunk parents, or all ports when
+        ``[neutron] trunk_subports_in_network_data`` is disabled, are left
+        untouched.
+
+        :param vif: The ``nova.network.model.VIF`` built from
+            ``current_neutron_port``.
+        :param current_neutron_port: The neutron port ``vif`` was built from.
+        :param context: Request context.
+        :param client: Neutron client.
+        """
+        if not CONF.neutron.trunk_subports_in_network_data:
+            return
+
+        sub_ports = current_neutron_port.get('trunk_details', {}).get(
+            'sub_ports', [])
+        if not sub_ports:
+            return
+
+        # Subports and their networks are listed in bulk, as a trunk can have
+        # hundreds of subports, in chunks so as to not exceed the maximum
+        # length of a request URI.
+        port_ids = [sub_port['port_id'] for sub_port in sub_ports]
+        ports = {
+            port['id']: port
+            for chunk in _chunk_ids(port_ids)
+            for port in client.list_ports(id=chunk).get('ports', [])}
+        if not ports:
+            return
+        net_ids = list({port['network_id'] for port in ports.values()})
+        networks = [
+            network
+            for chunk in _chunk_ids(net_ids)
+            for network in client.list_networks(id=chunk).get('networks', [])]
+        # Fetch the rest of what the subport VIFs are built from in bulk too,
+        # rather than per subport, as a trunk can have hundreds of them.
+        prefetched = self._prefetch_vif_model_data(
+            client, list(ports.values()), networks)
+
+        for sub_port in sub_ports:
+            port = ports.get(sub_port['port_id'])
+            if port is None:
+                # The subport was deleted after the trunk details were read
+                LOG.debug('Subport %(subport)s of trunk parent port '
+                          '%(parent)s no longer exists, skipping it.',
+                          {'subport': sub_port['port_id'],
+                           'parent': current_neutron_port['id']})
+                continue
+
+            # Subports are attached to the trunk rather than the instance,
+            # so nova must never delete them; mark them as preexisting.
+            subport_vif = self._build_vif_model(
+                context, client, port, networks, [port['id']], prefetched)
+            subport_vif['meta']['segmentation_id'] = sub_port.get(
+                'segmentation_id')
+            subport_vif['meta']['segmentation_type'] = sub_port.get(
+                'segmentation_type')
+            vif['trunk_vifs'].append(subport_vif)
+
+    def _prefetch_vif_model_data(self, client, ports, networks):
+        """Fetch in bulk what neutron VIF models of ports are built from.
+
+        :param client: Neutron client.
+        :param ports: The neutron ports to fetch the details of.
+        :param networks: The neutron networks of ``ports``, as returned to an
+            admin so that they include their provider attributes.
+        :returns: A ``_PrefetchedNeutronData`` for ``ports``.
+        """
+        # NOTE: Neutron lists every resource when filtering on an empty list
+        # of IDs, which _chunk_ids() doesn't make any chunk of.
+        subnet_ids = list({fixed_ip['subnet_id'] for port in ports
+                           for fixed_ip in port['fixed_ips']})
+        subnets = [
+            subnet
+            for chunk in _chunk_ids(subnet_ids)
+            for subnet in client.list_subnets(id=chunk).get('subnets', [])]
+        net_ids = list({subnet['network_id'] for subnet in subnets})
+        dhcp_ports = [
+            port
+            for chunk in _chunk_ids(net_ids)
+            for port in client.list_ports(
+                network_id=chunk,
+                device_owner='network:dhcp').get('ports', [])]
+        floating_ips = [
+            floating_ip
+            for chunk in _chunk_ids([port['id'] for port in ports])
+            for floating_ip in self._safe_get_floating_ips(
+                client, port_id=chunk)]
+        return _PrefetchedNeutronData(
+            networks, subnets, dhcp_ports, floating_ips)
 
     def _build_network_info_model(self, context, instance, networks=None,
                                   port_ids=None, admin_client=None,
@@ -3533,6 +3700,8 @@ class API:
                     refreshed_vif = self._build_vif_model(
                         context, client, current_neutron_port, networks,
                         preexisting_port_ids)
+                    self._populate_trunk_info(
+                        refreshed_vif, current_neutron_port, context, client)
                     for index, vif in enumerate(nw_info):
                         if vif['id'] == refresh_vif_id:
                             self._log_error_if_vnic_type_changed(
@@ -3606,7 +3775,12 @@ class API:
                             vif['vnic_type'],
                             instance,
                         )
+
+                self._populate_trunk_info(
+                    vif, current_neutron_port, context, client)
+
                 nw_info.append(vif)
+
             elif nw_info_refresh:
                 LOG.info('Port %s from network info_cache is no '
                          'longer associated with instance in Neutron. '
@@ -3652,8 +3826,13 @@ class API:
 
         return port_order_list
 
-    def _get_subnets_from_port(self, context, port, client=None):
-        """Return the subnets for a given port."""
+    def _get_subnets_from_port(self, context, port, client=None,
+                               prefetched=None):
+        """Return the subnets for a given port.
+
+        :param prefetched: Optional ``_PrefetchedNeutronData`` for the port,
+            used instead of looking up its subnets in neutron.
+        """
 
         fixed_ips = port['fixed_ips']
         # No fixed_ips for the port means there is no subnet associated
@@ -3666,8 +3845,12 @@ class API:
         if not client:
             client = get_client(context)
         search_opts = {'id': list(set(ip['subnet_id'] for ip in fixed_ips))}
-        data = client.list_subnets(**search_opts)
-        ipam_subnets = data.get('subnets', [])
+        if prefetched is None:
+            data = client.list_subnets(**search_opts)
+            ipam_subnets = data.get('subnets', [])
+        else:
+            ipam_subnets = [subnet for subnet in prefetched.subnets.values()
+                            if subnet['id'] in search_opts['id']]
         subnets = []
 
         for subnet in ipam_subnets:
@@ -3681,11 +3864,15 @@ class API:
                 subnet_dict['ipv6_address_mode'] = subnet['ipv6_address_mode']
 
             # attempt to populate DHCP server field
-            dhcp_search_opts = {
-                'network_id': subnet['network_id'],
-                'device_owner': 'network:dhcp'}
-            data = client.list_ports(**dhcp_search_opts)
-            dhcp_ports = data.get('ports', [])
+            if prefetched is None:
+                dhcp_search_opts = {
+                    'network_id': subnet['network_id'],
+                    'device_owner': 'network:dhcp'}
+                data = client.list_ports(**dhcp_search_opts)
+                dhcp_ports = data.get('ports', [])
+            else:
+                dhcp_ports = prefetched.dhcp_ports.get(
+                    subnet['network_id'], [])
             for p in dhcp_ports:
                 for ip_pair in p['fixed_ips']:
                     if ip_pair['subnet_id'] == subnet['id']:

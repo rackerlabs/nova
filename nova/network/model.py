@@ -418,7 +418,7 @@ class VIF(Model):
                  qbh_params=None, qbg_params=None, active=False,
                  vnic_type=VNIC_TYPE_NORMAL, profile=None,
                  preserve_on_delete=False, delegate_create=False,
-                 **kwargs):
+                 trunk_vifs=None, **kwargs):
         super(VIF, self).__init__()
 
         self['id'] = id
@@ -436,6 +436,7 @@ class VIF(Model):
         self['profile'] = profile
         self['preserve_on_delete'] = preserve_on_delete
         self['delegate_create'] = delegate_create
+        self['trunk_vifs'] = trunk_vifs or []
 
         self._set_meta(kwargs)
 
@@ -443,8 +444,14 @@ class VIF(Model):
         keys = ['id', 'address', 'network', 'vnic_type',
                 'type', 'profile', 'details', 'devname',
                 'ovs_interfaceid', 'qbh_params', 'qbg_params',
-                'active', 'preserve_on_delete', 'delegate_create']
-        return all(self[k] == other[k] for k in keys)
+                'active', 'preserve_on_delete', 'delegate_create',
+                'trunk_vifs']
+        # A trunk subport's segmentation can change without changing its
+        # binding profile. Include it so info cache refreshes see the change.
+        meta_keys = ['segmentation_id', 'segmentation_type']
+        return (all(self[k] == other[k] for k in keys) and
+                all(self['meta'].get(k) == other['meta'].get(k)
+                    for k in meta_keys))
 
     def __ne__(self, other):
         return not self.__eq__(other)
@@ -509,6 +516,8 @@ class VIF(Model):
     @classmethod
     def hydrate(cls, vif):
         vif = cls(**vif)
+        vif['trunk_vifs'] = [VIF.hydrate(trunk_vif)
+                             for trunk_vif in vif['trunk_vifs']]
         vif['network'] = Network.hydrate(vif['network'])
         return vif
 

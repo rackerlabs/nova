@@ -19,6 +19,7 @@
 
 """Network-related utilities for supporting libvirt connection code."""
 
+import collections
 import os
 
 import jinja2
@@ -171,6 +172,9 @@ def get_network_metadata(network_info):
     This data is exposed as network_data.json in the metadata service and
     the config drive.
 
+    Trunk subports of each VIF are exposed as ``vlan`` links on top of the
+    link of their parent port, after the links of all the parent ports.
+
     :param network_info: `nova.network.models.NetworkInfo` object describing
         the network metadata.
     """
@@ -186,8 +190,21 @@ def get_network_metadata(network_info):
     ifc_num = -1
     net_num = -1
 
-    for vif in network_info:
-        if not vif.get('network') or not vif['network'].get('subnets'):
+    # Trunk subports are queued behind all the other VIFs, along with the
+    # link of their parent port.
+    vifs = collections.deque((vif, None) for vif in network_info)
+    while vifs:
+        vif, vlan_link = vifs.popleft()
+
+        # Only VLAN subports can be exposed, as 'vlan' links
+        trunk_vifs = [trunk_vif for trunk_vif in vif.get('trunk_vifs', [])
+                      if trunk_vif.get_meta('segmentation_type') == 'vlan']
+
+        if not vif.get('network'):
+            continue
+        # The parent port of a trunk needs a link for its subports to sit on
+        # top of, even if it isn't on a network with subnets itself.
+        if not vif['network'].get('subnets') and not trunk_vifs:
             continue
 
         network = vif['network']
@@ -200,10 +217,11 @@ def get_network_metadata(network_info):
         ifc_num += 1
         link = None
 
-        # Get the VIF or physical NIC data
-        if subnet_v4 or subnet_v6:
-            link = _get_eth_link(vif, ifc_num)
+        # Get the VIF, physical NIC or VLAN data
+        if subnet_v4 or subnet_v6 or trunk_vifs:
+            link = _get_eth_link(vif, ifc_num, vlan_link)
             links.append(link)
+            vifs.extend((trunk_vif, link['id']) for trunk_vif in trunk_vifs)
 
         # Add IPv4 and IPv6 networks if they exist
         if subnet_v4 and subnet_v4.get('ips'):
@@ -240,21 +258,26 @@ def get_ec2_ip_info(network_info):
     return ip_info
 
 
-def _get_eth_link(vif, ifc_num):
-    """Get a VIF or physical NIC representation.
+def _get_eth_link(vif, ifc_num, vlan_link=None):
+    """Get a VIF, physical NIC or VLAN representation.
 
     :param vif: Neutron VIF
     :param ifc_num: Interface index for generating name if the VIF's
         'devname' isn't defined.
+    :param vlan_link: The ID of the link of the trunk parent port when
+        ``vif`` is a trunk subport.
     :return: A dict with 'id', 'vif_id', 'type', 'mtu' and
-        'ethernet_mac_address' as keys
+        'ethernet_mac_address' as keys. Trunk subports are of type 'vlan'
+        and additionally have 'vlan_link', 'vlan_id' and 'vlan_mac_address'.
     """
     link_id = vif.get('devname')
     if not link_id:
         link_id = 'interface%d' % ifc_num
 
     # Use 'phy' for physical links. Ethernet can be confusing
-    if vif.get('type') in model.LEGACY_EXPOSED_VIF_TYPES:
+    if vlan_link is not None:
+        nic_type = 'vlan'
+    elif vif.get('type') in model.LEGACY_EXPOSED_VIF_TYPES:
         nic_type = vif.get('type')
     else:
         nic_type = 'phy'
@@ -266,6 +289,14 @@ def _get_eth_link(vif, ifc_num):
         'mtu': _get_link_mtu(vif),
         'ethernet_mac_address': vif.get('address'),
     }
+
+    if nic_type == 'vlan':
+        link.update({
+            'vlan_link': vlan_link,
+            'vlan_id': vif.get_meta('segmentation_id'),
+            'vlan_mac_address': vif.get('address'),
+        })
+
     return link
 
 

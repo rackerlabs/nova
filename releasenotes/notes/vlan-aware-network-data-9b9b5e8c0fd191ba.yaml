@@ -1,0 +1,30 @@
+---
+features:
+  - |
+    Neutron trunk subports of an instance's ports can now be exposed in
+    ``network_data.json``, served by both the metadata API and the config
+    drive, by enabling the new ``[neutron] trunk_subports_in_network_data``
+    option consistently on all ``nova-compute`` and ``nova-api`` services. Both can
+    rebuild the network info cache; enabling it only on ``nova-compute``
+    allows API operations such as associating a floating IP to remove the
+    cached subports until the next compute refresh. It is disabled by default.
+    Each subport is described as a ``vlan`` link on top of the link of its
+    trunk parent port, along with the networks of the subport, which allows
+    tools such as cloud-init to configure VLAN sub-interfaces in the guest.
+    Subports with a segmentation type of ``vlan`` are exposed when they are
+    on a network with subnets. The trunk parent port is always exposed as a
+    link, even when it has no IP address of its own, so that the VLAN links of
+    its subports can refer to it.
+issues:
+  - |
+    Subports added to or removed from a trunk after an instance is created are
+    only reflected in the metadata API once the trunk parent port is refreshed
+    in the instance network info cache. Neutron needs to send a
+    ``network-changed`` server external event for the trunk parent port when
+    the subports of the trunk change for this to happen right away. Otherwise
+    the changes are only reflected once something else rebuilds the network
+    info cache, such as a reboot or a migration of the instance, or the
+    periodic ``_heal_instance_info_cache`` task, which is disabled by default
+    by ``[DEFAULT] heal_instance_info_cache_interval``. The config drive is
+    generated when the instance is created and is not updated with later trunk
+    changes.

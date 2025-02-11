@@ -116,6 +116,27 @@ class _TestInstanceInfoCacheObject(object):
         self.assertEqual(fake_info_cache['instance_uuid'], obj.instance_uuid)
         mock_get.assert_called_once_with(self.context, uuids.info_instance_1)
 
+    @mock.patch.object(db, 'instance_info_cache_get')
+    def test_refresh_trunk_segmentation(self, mock_get):
+        nwinfo = network_model.NetworkInfo([
+            network_model.VIF(id=uuids.parent_port, trunk_vifs=[
+                network_model.VIF(id=uuids.subport, profile={},
+                                  segmentation_id=101,
+                                  segmentation_type='vlan')])])
+        obj = instance_info_cache.InstanceInfoCache.new(
+            self.context, uuids.info_instance)
+        obj.network_info = nwinfo
+        current = network_model.NetworkInfo.hydrate(nwinfo.json())
+        current[0]['trunk_vifs'][0]['meta']['segmentation_id'] = 102
+        mock_get.return_value = dict(fake_info_cache,
+                                     network_info=current.json())
+
+        obj.refresh()
+
+        self.assertEqual(102, obj.network_info[0]['trunk_vifs'][0].get_meta(
+            'segmentation_id'))
+        mock_get.assert_called_once_with(self.context, uuids.info_instance)
+
 
 class TestInstanceInfoCacheObject(test_objects._LocalTest,
                                   _TestInstanceInfoCacheObject):

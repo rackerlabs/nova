@@ -347,6 +347,50 @@ example:
 
 ::download:`Download</../../doc/api_schemas/network_data.json>` network_data.json JSON schema.
 
+To expose trunk subports, enable
+:oslo.config:option:`neutron.trunk_subports_in_network_data` consistently on
+all ``nova-compute`` and ``nova-api`` services. Both services can rebuild the
+instance network info cache. Enabling it only on ``nova-compute`` allows API
+operations such as associating a floating IP to remove the cached subports
+until the next compute refresh.
+
+If the :oslo.config:option:`neutron.trunk_subports_in_network_data` option is
+enabled and a port of the instance is the parent port of a neutron trunk, each
+of the trunk's subports is described as a ``vlan`` link on top of the link of the
+parent port, with the subport's networks attached to that ``vlan`` link. For
+example:
+
+.. code-block:: json
+
+   {
+       "id": "tap8e2c6c3b-5a",
+       "type": "vlan",
+       "vif_id": "8e2c6c3b-5a4f-4b5e-9a0e-6f3c1d2b7a91",
+       "mtu": 1500,
+       "ethernet_mac_address": "fa:16:3e:9c:bf:3d",
+       "vlan_link": "tapcd9f6d46-4a",
+       "vlan_id": 101,
+       "vlan_mac_address": "fa:16:3e:9c:bf:3d"
+   }
+
+Subports with a segmentation type of ``vlan`` are exposed when they are on a
+network with subnets. The parent port is always given a link,
+even if it is not on a network with subnets itself.
+
+.. note::
+
+   Subports added to or removed from a trunk after the instance is created
+   are reflected in the metadata API once ``nova-compute`` refreshes the
+   trunk parent port in the instance's network info cache. This happens when
+   neutron sends a ``network-changed`` server external event for the trunk
+   parent port as the subports of the trunk change. Without that event, the
+   changes are only reflected once something else rebuilds the network info
+   cache, such as a reboot or a migration of the instance, or the periodic
+   refresh controlled by the
+   :oslo.config:option:`heal_instance_info_cache_interval` option, which is
+   disabled by default. The config drive is generated when the instance is
+   created and does not reflect later changes to the trunk.
+
 .. _metadata-ec2-format:
 
 EC2-compatible metadata

@@ -108,6 +108,34 @@ Possible values:
 
 * Any integer value. 0 means connection is attempted only once
 """),
+    cfg.BoolOpt("trunk_subports_in_network_data",
+        default=False,
+        help="""
+Expose neutron trunk subports in network metadata.
+
+When enabled, the subports of any trunk whose parent port is attached to an
+instance are fetched from neutron and stored in the instance's network info
+cache. Subports with a segmentation type of ``vlan`` are then exposed as
+``vlan`` links on top of the link of their parent port in
+``network_data.json``, served by both the metadata API and the config drive.
+
+Set this option consistently on all ``nova-compute`` and ``nova-api`` services.
+Both services can rebuild the network info cache. If it is enabled only on
+``nova-compute``, API operations such as associating a floating IP can remove
+the cached subports until the next compute refresh. Changing it only takes
+effect for an existing instance once its network info cache is next refreshed.
+
+Subports added to or removed from a trunk after an instance is created are
+reflected once the trunk parent port is refreshed in the network info cache,
+which happens when neutron sends a ``network-changed`` event for the trunk
+parent port. Otherwise, they are only reflected once the network info cache is
+next rebuilt, for example on a reboot, or by the periodic refresh if
+``[DEFAULT] heal_instance_info_cache_interval`` is enabled.
+
+Related options:
+
+* ``[DEFAULT] heal_instance_info_cache_interval``
+"""),
 ]
 
 metadata_proxy_opts = [

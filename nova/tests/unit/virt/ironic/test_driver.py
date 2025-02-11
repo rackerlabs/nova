@@ -3040,6 +3040,52 @@ class IronicDriverGenerateConfigDriveTestCase(test.NoDBTestCase):
                                                     mock_instance_meta):
         self._test_generate_network_metadata(vif_internal_info=False)
 
+    def test_generate_network_metadata_trunk_on_pg(self, mock_cd_builder,
+                                                   mock_instance_meta):
+        subport_vif = network_model.VIF(
+            id=uuids.subport,
+            address='fa:16:3e:00:01:01',
+            network=self.network_info[0]['network'],
+            type=network_model.VIF_TYPE_OTHER,
+            devname=('tap' + uuids.subport)[:network_model.NIC_NAME_LEN],
+            preserve_on_delete=True,
+            meta={'segmentation_type': 'vlan', 'segmentation_id': 101})
+        self.network_info[0]['trunk_vifs'].append(subport_vif)
+        portgroup = ironic_utils.get_test_portgroup(
+            node_id=self.node.id,
+            internal_info={'tenant_vif_port_id': utils.FAKE_VIF_UUID})
+        port1 = ironic_utils.get_test_port(id=uuidutils.generate_uuid(),
+                                           node_id=self.node.id,
+                                           address='00:00:00:00:00:01',
+                                           port_group_id=portgroup.id)
+        port2 = ironic_utils.get_test_port(id=uuidutils.generate_uuid(),
+                                           node_id=self.node.id,
+                                           address='00:00:00:00:00:02',
+                                           port_group_id=portgroup.id)
+        self.mock_conn.ports.return_value = iter([port1, port2])
+        self.mock_conn.port_groups.return_value = iter([portgroup])
+
+        metadata = self.driver._get_network_metadata(self.node,
+                                                     self.network_info)
+
+        # The VLAN of the subport sits on top of the bond of the trunk parent
+        bond_link = metadata['links'][0]
+        self.assertEqual('bond', bond_link['type'])
+        vlan_links = [link for link in metadata['links']
+                      if link['type'] == 'vlan']
+        self.assertEqual(1, len(vlan_links))
+        self.assertEqual(uuids.subport, vlan_links[0]['vif_id'])
+        self.assertEqual(bond_link['id'], vlan_links[0]['vlan_link'])
+        self.assertEqual(101, vlan_links[0]['vlan_id'])
+        self.assertEqual('fa:16:3e:00:01:01',
+                         vlan_links[0]['vlan_mac_address'])
+        self.assertIn(vlan_links[0]['id'],
+                      [net['link'] for net in metadata['networks']])
+        # assert there are no duplicate links
+        link_ids = [link['id'] for link in metadata['links']]
+        self.assertEqual(len(set(link_ids)), len(link_ids),
+                         'There are duplicate link IDs: %s' % link_ids)
+
     def test_generate_network_metadata_ports_only(self, mock_cd_builder,
                                                   mock_instance_meta):
         address = self.network_info[0]['address']

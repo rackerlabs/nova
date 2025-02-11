@@ -14,7 +14,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
+
+import jsonschema
 from oslo_config import cfg
+from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import exception
@@ -354,6 +358,23 @@ class VIFTests(test.NoDBTestCase):
         vif2 = model.VIF()
         self.assertEqual(vif1, vif2)
 
+    def test_vif_trunk_segmentation_equality(self):
+        subport = model.VIF(segmentation_id=101, segmentation_type='vlan')
+        parent = model.VIF(trunk_vifs=[subport])
+        for segmentation_id, segmentation_type, equal in (
+                (101, 'vlan', True), (102, 'vlan', False),
+                (101, 'other', False), (None, None, False)):
+            with self.subTest(segmentation_id=segmentation_id,
+                              segmentation_type=segmentation_type):
+                other = model.VIF(trunk_vifs=[model.VIF(
+                    segmentation_id=segmentation_id,
+                    segmentation_type=segmentation_type)])
+                self.assertEqual(equal, parent == other)
+                self.assertEqual(not equal, parent != other)
+
+    def test_vif_equality_ignores_other_metadata(self):
+        self.assertEqual(model.VIF(foo='bar'), model.VIF(foo='baz'))
+
     def test_vif_not_equal(self):
         vif1 = model.VIF(id=1)
         vif2 = model.VIF(id=2)
@@ -397,6 +418,10 @@ class VIFTests(test.NoDBTestCase):
 
         vif1 = model.VIF(preserve_on_delete=True)
         vif2 = model.VIF(preserve_on_delete=False)
+        self.assertNotEqual(vif1, vif2)
+
+        vif1 = model.VIF(trunk_vifs=[model.VIF(id=1)])
+        vif2 = model.VIF(trunk_vifs=[model.VIF(id=2)])
         self.assertNotEqual(vif1, vif2)
 
     def test_create_vif_with_type(self):
@@ -463,6 +488,36 @@ class VIFTests(test.NoDBTestCase):
         self.assertEqual('bridge', vif['type'])
         self.assertEqual(fake_network_cache_model.new_network(),
                          vif['network'])
+
+    def test_hydrate_vif_with_trunk_vifs(self):
+        subport = fake_network_cache_model.new_vif(
+            {'id': uuids.subport, 'type': model.VIF_TYPE_OVS,
+             'preserve_on_delete': True,
+             'meta': {'segmentation_id': 100, 'segmentation_type': 'vlan'}})
+        vif = fake_network_cache_model.new_vif({'trunk_vifs': [subport]})
+
+        # Round trip through JSON so that hydrate() is given plain dicts,
+        # as it is when loading the network info cache from the database.
+        vif = model.VIF.hydrate(jsonutils.loads(jsonutils.dumps(vif)))
+
+        self.assertEqual(1, len(vif['trunk_vifs']))
+        trunk_vif = vif['trunk_vifs'][0]
+        self.assertIsInstance(trunk_vif, model.VIF)
+        self.assertIsInstance(trunk_vif['network'], model.Network)
+        self.assertEqual(subport, trunk_vif)
+        self.assertEqual(
+            {'segmentation_id': 100, 'segmentation_type': 'vlan'},
+            trunk_vif['meta'])
+
+    def test_hydrate_vif_without_trunk_vifs_key(self):
+        # Network info cached before trunk_vifs was added won't have the key
+        vif_dict = jsonutils.loads(
+            jsonutils.dumps(fake_network_cache_model.new_vif()))
+        del vif_dict['trunk_vifs']
+
+        vif = model.VIF.hydrate(vif_dict)
+
+        self.assertEqual([], vif['trunk_vifs'])
 
 
 class NetworkInfoTests(test.NoDBTestCase):
@@ -1080,6 +1135,176 @@ class TestNetworkMetadata(test.NoDBTestCase):
 
     def test_get_network_metadata_json_ipv6_addr_mode_stateless(self):
         self._test_get_network_metadata_json_ipv6_addr_mode('dhcpv6-stateless')
+
+    @staticmethod
+    def _devname(port_id):
+        return ('tap' + port_id)[:model.NIC_NAME_LEN]
+
+    def _new_trunk_vif(self, parent_id, parent_mac, sub_ports,
+                       parent_network=None, parent_devname=True):
+        """Build a trunk parent VIF as it is cached by nova.
+
+        :param parent_id: The port ID of the trunk parent.
+        :param parent_mac: The MAC address of the trunk parent.
+        :param sub_ports: List of (port_id, network_id, mac,
+            segmentation_type, segmentation_id) tuples for the subports of
+            the trunk.
+        :param parent_network: The network of the trunk parent, defaults to
+            one with an IPv4 subnet.
+        :param parent_devname: Whether the trunk parent has a devname.
+        """
+        parent_vif = fake_network_cache_model.new_vif(
+            {'id': parent_id,
+             'type': model.VIF_TYPE_OVS,
+             'address': parent_mac,
+             'devname': (self._devname(parent_id)
+                         if parent_devname else None)})
+        if parent_network is not None:
+            parent_vif['network'] = parent_network
+        for port_id, net_id, mac, seg_type, seg_id in sub_ports:
+            # NOTE: The binding profile is left empty as it is with ML2/OVS,
+            # only ML2/OVN records the trunk details of a subport there.
+            parent_vif['trunk_vifs'].append(fake_network_cache_model.new_vif(
+                {'id': port_id,
+                 'type': model.VIF_TYPE_OVS,
+                 'address': mac,
+                 'devname': self._devname(port_id),
+                 'network': fake_network_cache_model.new_network(
+                     {'id': net_id}),
+                 'profile': {},
+                 'preserve_on_delete': True,
+                 'meta': {'segmentation_type': seg_type,
+                          'segmentation_id': seg_id}}))
+        return parent_vif
+
+    def _new_trunk_netinfo(self, seg_type='vlan', seg_id=1049, **kwargs):
+        return model.NetworkInfo([self._new_trunk_vif(
+            uuids.parent_port, 'fa:16:3e:00:00:01',
+            [(uuids.subport, uuids.subport_net, 'fa:16:3e:00:01:01',
+              seg_type, seg_id)], **kwargs)])
+
+    def _subport_link(self, vlan_link, vlan_id=1049):
+        return {
+            'id': self._devname(uuids.subport),
+            'vif_id': uuids.subport,
+            'type': 'vlan',
+            'mtu': None,
+            'ethernet_mac_address': 'fa:16:3e:00:01:01',
+            'vlan_link': vlan_link,
+            'vlan_id': vlan_id,
+            'vlan_mac_address': 'fa:16:3e:00:01:01',
+        }
+
+    def test_get_network_metadata_json_trunks(self):
+        netinfo = self._new_trunk_netinfo()
+
+        net_metadata = netutils.get_network_metadata(netinfo)
+
+        parent_link = self._devname(uuids.parent_port)
+        self.assertEqual(
+            [
+                {
+                    'id': parent_link,
+                    'vif_id': uuids.parent_port,
+                    'type': model.VIF_TYPE_OVS,
+                    'mtu': None,
+                    'ethernet_mac_address': 'fa:16:3e:00:00:01',
+                },
+                self._subport_link(parent_link),
+            ],
+            net_metadata['links'])
+
+        # The subport's network is attached to the VLAN link
+        self.assertEqual(
+            [('network0', parent_link, uuids.network_id),
+             ('network1', self._devname(uuids.subport), uuids.subport_net)],
+            [(net['id'], net['link'], net['network_id'])
+             for net in net_metadata['networks']])
+
+        schema_file = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '../../../../doc/api_schemas/network_data.json'))
+        with open(schema_file, 'rb') as f:
+            schema = jsonutils.load(f)
+        jsonschema.validate(net_metadata, schema)
+
+    def test_get_network_metadata_json_trunks_parent_no_devname(self):
+        netinfo = self._new_trunk_netinfo(parent_devname=False)
+
+        net_metadata = netutils.get_network_metadata(netinfo)
+
+        # The VLAN must sit on the generated link name of the parent
+        self.assertEqual('interface0', net_metadata['links'][0]['id'])
+        self.assertEqual(self._subport_link('interface0'),
+                         net_metadata['links'][1])
+
+    def test_get_network_metadata_json_trunks_parent_no_subnets(self):
+        netinfo = self._new_trunk_netinfo(
+            parent_network=fake_network_cache_model.new_network(
+                {'subnets': []}))
+
+        net_metadata = netutils.get_network_metadata(netinfo)
+
+        # The parent still gets a link for the subport to sit on top of
+        parent_link = self._devname(uuids.parent_port)
+        self.assertEqual(
+            [
+                {
+                    'id': parent_link,
+                    'vif_id': uuids.parent_port,
+                    'type': model.VIF_TYPE_OVS,
+                    'mtu': None,
+                    'ethernet_mac_address': 'fa:16:3e:00:00:01',
+                },
+                self._subport_link(parent_link),
+            ],
+            net_metadata['links'])
+        self.assertEqual(
+            [('network0', self._devname(uuids.subport))],
+            [(net['id'], net['link']) for net in net_metadata['networks']])
+
+    def test_get_network_metadata_json_trunks_multiple_trunks(self):
+        netinfo = model.NetworkInfo([
+            self._new_trunk_vif(
+                uuids.parent1, 'fa:16:3e:00:00:01',
+                [(uuids.subport1, uuids.subport_net1, 'fa:16:3e:00:01:01',
+                  'vlan', 101)]),
+            self._new_trunk_vif(
+                uuids.parent2, 'fa:16:3e:00:00:02',
+                [(uuids.subport2, uuids.subport_net2, 'fa:16:3e:00:01:02',
+                  'vlan', 102),
+                 (uuids.subport3, uuids.subport_net3, 'fa:16:3e:00:01:03',
+                  'vlan', 103)]),
+        ])
+
+        net_metadata = netutils.get_network_metadata(netinfo)
+
+        # Parent ports come first, followed by all subports
+        self.assertEqual(
+            [(uuids.parent1, model.VIF_TYPE_OVS, None, None),
+             (uuids.parent2, model.VIF_TYPE_OVS, None, None),
+             (uuids.subport1, 'vlan', self._devname(uuids.parent1), 101),
+             (uuids.subport2, 'vlan', self._devname(uuids.parent2), 102),
+             (uuids.subport3, 'vlan', self._devname(uuids.parent2), 103)],
+            [(link['vif_id'], link['type'], link.get('vlan_link'),
+              link.get('vlan_id')) for link in net_metadata['links']])
+        self.assertEqual(
+            [('network%d' % i, self._devname(port_id))
+             for i, port_id in enumerate(
+                 (uuids.parent1, uuids.parent2, uuids.subport1,
+                  uuids.subport2, uuids.subport3))],
+            [(net['id'], net['link']) for net in net_metadata['networks']])
+
+    def test_get_network_metadata_json_trunks_subport_not_vlan(self):
+        netinfo = self._new_trunk_netinfo(seg_type='geneve')
+
+        net_metadata = netutils.get_network_metadata(netinfo)
+
+        parent_link = self._devname(uuids.parent_port)
+        self.assertEqual([parent_link],
+                         [link['id'] for link in net_metadata['links']])
+        self.assertEqual([parent_link],
+                         [net['link'] for net in net_metadata['networks']])
 
     def test__get_nets(self):
         expected_net = {
