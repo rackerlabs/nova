@@ -3344,6 +3344,85 @@ class TestAPI(TestAPIBase):
         mock_get_physnet.assert_has_calls([
             mock.call(self.context, mocked_client, 'net-id')] * 6)
 
+    @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
+                       return_value=(None, False))
+    @mock.patch.object(neutronapi.API, '_get_preexisting_port_ids',
+                       return_value=['port5'])
+    @mock.patch.object(neutronapi.API, '_get_subnets_from_port',
+                       return_value=[model.Subnet(cidr='1.0.0.0/8')])
+    @mock.patch.object(neutronapi.API, '_get_floating_ips_by_fixed_and_port',
+                       return_value=[{'floating_ip_address': '10.0.0.1'}])
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_build_network_info_model_trunk(
+        self, mock_get_client, mock_get_floating, mock_get_subnets,
+        mock_get_preexisting, mock_get_physnet):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_inst = objects.Instance()
+        fake_inst.project_id = uuids.fake
+        fake_inst.uuid = uuids.instance
+        fake_inst.info_cache = objects.InstanceInfoCache()
+        fake_inst.info_cache.network_info = model.NetworkInfo()
+        fake_ports = [
+            {'id': 'port1',
+             'network_id': 'net-id',
+             'admin_state_up': True,
+             'status': 'ACTIVE',
+             'tenant_id': uuids.fake,
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:05',
+             'binding:vif_type': model.VIF_TYPE_802_QBH,
+             'binding:vnic_type': model.VNIC_TYPE_MACVTAP,
+             constants.BINDING_PROFILE: {'pci_vendor_info': '1137:0047',
+                                         'pci_slot': '0000:0a:00.2',
+                                         'physical_network': 'physnet1'},
+             'binding:vif_details': {model.VIF_DETAILS_PROFILEID: 'pfid'},
+             'trunk_details': {"sub_ports": [{
+                 'segmentation_id': 1049,
+                 'segmentation_type': 'vlan',
+                 'port_id': 'subport1'}
+             ]},
+             },
+            ]
+        fake_subport = {
+            'id': 'subport2',
+            'network_id': 'net-id2',
+            'admin_state_up': True,
+            'status': 'ACTIVE',
+            'fixed_ips': [{'ip_address': '1.1.2.1'}],
+            'mac_address': 'aa:bb:cc:dd:ee:ff',
+            'binding:vif_type': model.VIF_TYPE_BRIDGE,
+            'binding:vnic_type': model.VNIC_TYPE_NORMAL,
+            'binding:vif_details': {},
+            'tenant_id': uuids.fake,
+        }
+        fake_nets = [
+            {'id': 'net-id',
+             'name': 'foo',
+             'tenant_id': uuids.fake,
+             }
+        ]
+        mocked_client.list_ports.return_value = {'ports': fake_ports}
+        mocked_client.show_port.return_value = {
+            'port': fake_subport}
+
+        fake_inst.info_cache = objects.InstanceInfoCache.new(
+            self.context, uuids.instance)
+        fake_inst.info_cache.network_info = model.NetworkInfo.hydrate([])
+
+        nw_infos = self.api._build_network_info_model(
+            self.context, fake_inst,
+            fake_nets,
+            [fake_ports[0]['id']],
+            preexisting_port_ids=[])
+
+        mocked_client.list_ports.assert_called_once_with(
+            tenant_id=uuids.fake, device_id=uuids.instance)
+        mocked_client.show_port.assert_called_once_with(
+            'subport1')
+        self.assertIn("trunk_vifs", nw_infos[0])
+        self.assertEqual(1, len(nw_infos[0]["trunk_vifs"]))
+
     @mock.patch.object(neutronapi, 'get_client')
     @mock.patch('nova.network.neutron.API._nw_info_get_subnets')
     @mock.patch('nova.network.neutron.API._nw_info_get_ips')
