@@ -910,7 +910,42 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             security_groups=sec_groups,
             bind_host_id=instance.get('host'),
             resource_provider_mapping=rp_mapping,
-            network_arqs=network_arqs)
+            network_arqs=network_arqs,
+            vnic_type=None)
+
+    @mock.patch.object(objects.Instance, 'save')
+    def test_allocate_network_uses_non_default_vnic_type(self, mock_save):
+        instance = fake_instance.fake_instance_obj(
+            self.context, expected_attrs=['system_metadata'])
+        req_networks = objects.NetworkRequestList(
+            objects=[objects.NetworkRequest(network_id='fake')])
+        sec_groups = 'fake-sec-groups'
+        rp_mapping = {}
+        network_arqs = {}
+
+        with test.nested(
+            mock.patch.object(
+                self.compute.driver, 'get_vnic_type',
+                return_value=network_model.VNIC_TYPE_BAREMETAL),
+            mock.patch.object(
+                self.compute.network_api, 'allocate_for_instance',
+                return_value='nwinfo'),
+        ) as (mock_get_vnic_type, mock_allocate):
+            result = self.compute._allocate_network_async(
+                self.context, instance, req_networks, sec_groups, rp_mapping,
+                network_arqs)
+
+        self.assertEqual('nwinfo', result)
+        mock_get_vnic_type.assert_called_once_with()
+        mock_allocate.assert_called_once_with(
+            self.context, instance,
+            requested_networks=req_networks,
+            security_groups=sec_groups,
+            bind_host_id=instance.get('host'),
+            resource_provider_mapping=rp_mapping,
+            network_arqs=network_arqs,
+            vnic_type=network_model.VNIC_TYPE_BAREMETAL)
+        self.assertFalse(mock_save.called)
 
     @mock.patch.object(manager.ComputeManager, '_instance_update')
     @mock.patch.object(time, 'sleep')
