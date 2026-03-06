@@ -45,6 +45,7 @@ from nova.console import type as console_type
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
+from nova.network import model as network_model
 from nova import objects
 from nova.objects import external_event as external_event_obj
 from nova.objects import fields as obj_fields
@@ -1849,6 +1850,10 @@ class IronicDriver(virt_driver.ComputeDriver):
         # call when updating mac address or setting binding:profile
         # to tell Neutron to bind the port.
         return None
+
+    def get_vnic_type(self):
+        """Get the vnic_type used for Nova-created ports."""
+        return network_model.VNIC_TYPE_BAREMETAL
 
     def _get_node_console_with_reset(self, instance):
         """Acquire console information for an instance.

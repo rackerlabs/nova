@@ -2506,6 +2506,10 @@ class IronicDriverTestCase(test.NoDBTestCase):
         host_id = self.driver.network_binding_host_id(self.ctx, instance)
         self.assertIsNone(host_id)
 
+    def test_get_vnic_type(self):
+        self.assertEqual(network_model.VNIC_TYPE_BAREMETAL,
+                         self.driver.get_vnic_type())
+
     def test_get_volume_connector(self):
         node_uuid = uuids.node_uuid
         node_props = {'cpu_arch': 'x86_64'}

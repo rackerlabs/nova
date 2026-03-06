@@ -2023,6 +2023,15 @@ class ComputeDriver(object):
         """
         return instance.get('host')
 
+    def get_vnic_type(self):
+        """Get the vnic_type used for Nova-created ports.
+
+        :returns: a binding:vnic_type string to set on auto-created ports,
+            or None to leave the vnic_type unset (Neutron will use its
+            default, which is 'normal').
+        """
+        return None
+
     def manages_network_binding_host_id(self):
         """Compute driver manages port bindings.
 

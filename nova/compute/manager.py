@@ -2158,6 +2158,7 @@ class ComputeManager(manager.Manager):
         attempts = retries + 1
         retry_time = 1
         bind_host_id = self.driver.network_binding_host_id(context, instance)
+        vnic_type = self.driver.get_vnic_type()
         for attempt in range(1, attempts + 1):
             try:
                 nwinfo = self.network_api.allocate_for_instance(
@@ -2166,7 +2167,8 @@ class ComputeManager(manager.Manager):
                         security_groups=security_groups,
                         bind_host_id=bind_host_id,
                         resource_provider_mapping=resource_provider_mapping,
-                        network_arqs=network_arqs)
+                        network_arqs=network_arqs,
+                        vnic_type=vnic_type)
                 LOG.debug('Instance network_info: |%s|', nwinfo,
                           instance=instance)
                 instance.system_metadata['network_allocated'] = 'True'
@@ -9082,12 +9084,14 @@ class ComputeManager(manager.Manager):
 
         instance.pci_requests.requests.extend(pci_reqs.requests)
 
+        vnic_type = self.driver.get_vnic_type()
         network_info = self.network_api.allocate_for_instance(
             context,
             instance,
             requested_networks,
             bind_host_id=bind_host_id,
             resource_provider_mapping=provider_mappings,
+            vnic_type=vnic_type,
         )
 
         if len(network_info) != 1:

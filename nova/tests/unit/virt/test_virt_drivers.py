@@ -753,6 +753,9 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         self.assertEqual(instance.host,
             self.connection.network_binding_host_id(self.ctxt, instance))
 
+    def test_get_vnic_type(self):
+        self.assertIsNone(self.connection.get_vnic_type())
+
     def test_get_allocation_ratio(self):
         inv = {}
         self.flags(cpu_allocation_ratio=16.1)

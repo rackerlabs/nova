@@ -10811,7 +10811,8 @@ class ComputeAPITestCase(BaseTestCase):
         mock_allocate.assert_called_once_with(
             self.context, instance,
             test.MatchType(objects.NetworkRequestList),
-            bind_host_id='fake-mini', resource_provider_mapping=None)
+            bind_host_id='fake-mini', resource_provider_mapping=None,
+            vnic_type=None)
         network_requests = mock_allocate.mock_calls[0][1][2]
         self.assertEqual(1, len(network_requests.objects))
         network_request = network_requests[0]
@@ -10832,6 +10833,45 @@ class ComputeAPITestCase(BaseTestCase):
         self.assertEqual([], pci_reqs.requests)
 
         return nwinfo, port_id
+
+    def test_attach_interface_uses_non_default_vnic_type(self):
+        instance = self._create_fake_instance_obj()
+        nwinfo = [fake_network_cache_model.new_vif()]
+        network_id = nwinfo[0]['network']['id']
+        port_id = nwinfo[0]['id']
+        req_ip = '1.2.3.4'
+        mock_allocate = mock.Mock(return_value=nwinfo)
+        self.compute.network_api.allocate_for_instance = mock_allocate
+
+        with test.nested(
+            mock.patch.dict(
+                self.compute.driver.capabilities,
+                supports_attach_interface=True
+            ),
+            mock.patch.object(
+                self.compute.driver, 'get_vnic_type',
+                return_value=network_model.VNIC_TYPE_BAREMETAL),
+            mock.patch(
+                'nova.utils.synchronized',
+                side_effect=lambda lockname: lambda f: f),
+            mock.patch("nova.network.neutron.API.create_resource_requests"),
+            mock.patch.object(
+                self.compute,
+                "_claim_pci_device_for_interface_attach",
+                return_value=None),
+            mock.patch.object(compute_utils, 'notify_about_instance_action'),
+        ) as (
+            _cap, mock_get_vnic_type, _mock_lock, mock_create_resource_req,
+            _mock_claim_pci, _mock_notify
+        ):
+            mock_create_resource_req.return_value = (
+                None, [], mock.sentinel.req_lvl_params)
+            self.compute.attach_interface(
+                self.context, instance, network_id, port_id, req_ip, None)
+
+        mock_get_vnic_type.assert_called_once_with()
+        self.assertEqual(network_model.VNIC_TYPE_BAREMETAL,
+                         mock_allocate.call_args.kwargs['vnic_type'])
 
     @mock.patch.object(compute_utils, 'notify_about_instance_action')
     def test_attach_interface_with_qos(self, mock_notify):
@@ -10877,7 +10917,8 @@ class ComputeAPITestCase(BaseTestCase):
             self.context, instance,
             test.MatchType(objects.NetworkRequestList),
             bind_host_id='fake-mini',
-            resource_provider_mapping=mock.sentinel.provider_mappings)
+            resource_provider_mapping=mock.sentinel.provider_mappings,
+            vnic_type=None)
         network_requests = mock_allocate.mock_calls[0][1][2]
         self.assertEqual(1, len(network_requests.objects))
         network_request = network_requests[0]
@@ -10955,7 +10996,8 @@ class ComputeAPITestCase(BaseTestCase):
         mock_allocate.assert_called_once_with(
             self.context, instance,
             test.MatchType(objects.NetworkRequestList),
-            bind_host_id='fake-mini', resource_provider_mapping=None)
+            bind_host_id='fake-mini', resource_provider_mapping=None,
+            vnic_type=None)
         network_requests = mock_allocate.mock_calls[0][1][2]
         self.assertEqual(1, len(network_requests.objects))
         network_request = network_requests[0]
@@ -11038,7 +11080,8 @@ class ComputeAPITestCase(BaseTestCase):
             self.context, instance,
             test.MatchType(objects.NetworkRequestList),
             bind_host_id='fake-mini',
-            resource_provider_mapping=mock.sentinel.provider_mappings)
+            resource_provider_mapping=mock.sentinel.provider_mappings,
+            vnic_type=None)
         network_requests = mock_allocate.mock_calls[0][1][2]
         self.assertEqual(1, len(network_requests.objects))
         network_request = network_requests[0]
@@ -11107,7 +11150,8 @@ class ComputeAPITestCase(BaseTestCase):
         mock_allocate.assert_called_once_with(
             self.context, instance,
             test.MatchType(objects.NetworkRequestList),
-            bind_host_id='fake-mini', resource_provider_mapping=None)
+            bind_host_id='fake-mini', resource_provider_mapping=None,
+            vnic_type=None)
         network_requests = mock_allocate.mock_calls[0][1][2]
         self.assertEqual(1, len(network_requests.objects))
         network_request = network_requests[0]
@@ -11183,7 +11227,8 @@ class ComputeAPITestCase(BaseTestCase):
             mock_allocate.assert_called_once_with(
                 self.context, instance,
                 test.MatchType(objects.NetworkRequestList),
-                bind_host_id='fake-host', resource_provider_mapping=None)
+                bind_host_id='fake-host', resource_provider_mapping=None,
+                vnic_type=None)
             network_requests = mock_allocate.mock_calls[0][1][2]
             self.assertEqual(1, len(network_requests.objects))
             network_request = network_requests[0]
@@ -11265,7 +11310,8 @@ class ComputeAPITestCase(BaseTestCase):
             mock_allocate.assert_called_once_with(
                 self.context, instance,
                 test.MatchType(objects.NetworkRequestList),
-                bind_host_id='fake-host', resource_provider_mapping=None)
+                bind_host_id='fake-host', resource_provider_mapping=None,
+                vnic_type=None)
             network_requests = mock_allocate.mock_calls[0][1][2]
             self.assertEqual(1, len(network_requests.objects))
             network_request = network_requests[0]

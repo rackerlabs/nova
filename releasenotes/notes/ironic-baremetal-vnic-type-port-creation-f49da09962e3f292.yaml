@@ -1,0 +1,11 @@
+---
+fixes:
+  - |
+    When Nova auto-creates Neutron ports for instances using the Ironic virt
+    driver, it now correctly sets ``binding:vnic_type`` to ``baremetal`` on
+    those ports. Previously, Nova did not set ``binding:vnic_type`` when
+    auto-creating ports, so Neutron would default to ``normal``. Ironic then
+    updates the port's ``binding:vnic_type`` to ``baremetal`` itself as part
+    of its normal operation, which triggered spurious warning log messages in
+    Nova about an unexpected vnic_type change. Ports are now created with the
+    correct type from the start, eliminating those warnings.

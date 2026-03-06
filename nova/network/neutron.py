@@ -469,8 +469,16 @@ class API:
                 'error.', {'port_id': port_id},
                 instance=instance)
 
-    def _create_port_minimal(self, context, port_client, instance, network_id,
-                             fixed_ip=None, security_group_ids=None):
+    def _create_port_minimal(
+        self,
+        context,
+        port_client,
+        instance,
+        network_id,
+        fixed_ip=None,
+        security_group_ids=None,
+        vnic_type=None,
+    ):
         """Attempts to create a port for the instance on the given network.
 
         :param context: The request context.
@@ -480,6 +488,7 @@ class API:
         :param fixed_ip: Optional fixed IP to use from the given network.
         :param security_group_ids: Optional list of security group IDs to
             apply to the port.
+        :param vnic_type: Optional binding:vnic_type to set on the port.
         :returns: The created port.
         :raises PortLimitExceeded: If neutron fails with an OverQuota error.
         :raises NoMoreFixedIps: If neutron fails with
@@ -498,6 +507,8 @@ class API:
             port_req_body['port']['network_id'] = network_id
             port_req_body['port']['admin_state_up'] = True
             port_req_body['port']['tenant_id'] = instance.project_id
+            if vnic_type is not None:
+                port_req_body['port']['binding:vnic_type'] = vnic_type
             if security_group_ids:
                 port_req_body['port']['security_groups'] = security_group_ids
 
@@ -997,8 +1008,16 @@ class API:
 
         return {net['id']: net for net in nets}
 
-    def _create_ports_for_instance(self, context, instance, ordered_networks,
-            nets, neutron, security_group_ids):
+    def _create_ports_for_instance(
+        self,
+        context,
+        instance,
+        ordered_networks,
+        nets,
+        neutron,
+        security_group_ids,
+        vnic_type=None,
+    ):
         """Create port for network_requests that don't have a port_id
 
         :param context: The request context.
@@ -1008,6 +1027,7 @@ class API:
         :param neutron: neutronclient built from users request context
         :param security_group_ids: a list of security group IDs to be applied
             to any ports created
+        :param vnic_type: Optional binding:vnic_type to set on created ports.
         :returns a list of pairs (NetworkRequest, created_port_uuid); note that
             created_port_uuid will be None for the pair where a pre-existing
             port was part of the user request
@@ -1048,7 +1068,8 @@ class API:
                     # create minimal port, if port not already created by user
                     created_port = self._create_port_minimal(
                         context, neutron, instance, request.network_id,
-                        request.address, security_group_ids)
+                        request.address, security_group_ids,
+                        vnic_type=vnic_type)
                     created_port_id = created_port['id']
                     created_port_ids.append(created_port_id)
 
@@ -1166,7 +1187,8 @@ class API:
                               requested_networks,
                               security_groups=None, bind_host_id=None,
                               resource_provider_mapping=None,
-                              network_arqs=None):
+                              network_arqs=None,
+                              vnic_type=None):
         """Allocate network resources for the instance.
 
         :param context: The request context.
@@ -1180,6 +1202,8 @@ class API:
             mapped to a list of resource provider UUIDs that are fulfilling
             such a resource request.
         :param network_arqs: dict keyed by arq uuid, of ARQs allocated to
+            ports.
+        :param vnic_type: Optional binding:vnic_type to set on newly created
             ports.
         :returns: network info as from get_instance_nw_info()
         """
@@ -1249,7 +1273,7 @@ class API:
         # instance and compute host.
         requests_and_created_ports = self._create_ports_for_instance(
             context, instance, ordered_networks, nets, neutron,
-            security_group_ids)
+            security_group_ids, vnic_type=vnic_type)
 
         #
         # Update existing and newly created ports

@@ -8902,6 +8902,37 @@ class TestAllocateForInstance(test.NoDBTestCase):
         mock_validate_ports.assert_called_once_with(
             self.context, self.instance, "admin", None)
 
+    @mock.patch.object(neutronapi.API, 'get_instance_nw_info')
+    @mock.patch.object(neutronapi.API, '_update_ports_for_instance')
+    @mock.patch.object(neutronapi.API, '_create_ports_for_instance')
+    @mock.patch.object(neutronapi.API, '_process_security_groups')
+    @mock.patch.object(neutronapi.API, '_clean_security_groups')
+    @mock.patch.object(neutronapi.API, '_validate_requested_network_ids')
+    @mock.patch.object(neutronapi.API, '_validate_requested_port_ids')
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_allocate_for_instance_passes_vnic_type(
+            self, mock_get_client, mock_validate_ports, mock_validate_nets,
+            mock_clean_sg, mock_sg, mock_create_ports, mock_update_ports,
+            mock_gni):
+        api = neutronapi.API()
+        mock_get_client.side_effect = ["user", "admin"]
+        mock_validate_ports.return_value = ({}, "ordered_nets")
+        mock_validate_nets.return_value = "nets"
+        mock_clean_sg.return_value = "security_groups"
+        mock_sg.return_value = "security_group_ids"
+        mock_create_ports.return_value = "requests_and_created_ports"
+        mock_update_ports.return_value = (
+            "nets", "ports", [uuids.preexist], [uuids.created])
+        mock_gni.return_value = [{"id": uuids.created}, {"id": uuids.preexist}]
+
+        api.allocate_for_instance(
+            self.context, self.instance, None,
+            vnic_type=model.VNIC_TYPE_BAREMETAL)
+
+        mock_create_ports.assert_called_once_with(
+            self.context, self.instance, "ordered_nets", "nets", "user",
+            "security_group_ids", vnic_type=model.VNIC_TYPE_BAREMETAL)
+
     def test_ensure_no_port_binding_failure_raises(self):
         port = {
             'id': uuids.port_id,
@@ -9087,6 +9118,28 @@ class TestAllocateForInstance(test.NoDBTestCase):
             {'port': {
                 'network_id': uuids.net, 'tenant_id': uuids.tenant_id,
                 'admin_state_up': True, 'device_id': self.instance.uuid}})
+
+    @mock.patch(
+        'nova.network.neutron.API.has_extended_resource_request_extension',
+        new=mock.Mock(return_value=False),
+    )
+    def test_create_ports_for_instance_with_vnic_type(self):
+        api = neutronapi.API()
+        ordered_networks = [objects.NetworkRequest(network_id=uuids.net)]
+        nets = {uuids.net: {"id": uuids.net, "port_security_enabled": False}}
+        mock_client = mock.Mock()
+        mock_client.create_port.return_value = {"port": {"id": uuids.port}}
+
+        result = api._create_ports_for_instance(
+            self.context, self.instance, ordered_networks, nets, mock_client,
+            None, vnic_type=model.VNIC_TYPE_BAREMETAL)
+
+        self.assertEqual([(ordered_networks[0], uuids.port)], result)
+        mock_client.create_port.assert_called_once_with(
+            {'port': {
+                'network_id': uuids.net, 'tenant_id': uuids.tenant_id,
+                'admin_state_up': True, 'device_id': self.instance.uuid,
+                'binding:vnic_type': model.VNIC_TYPE_BAREMETAL}})
 
     @mock.patch(
         'nova.network.neutron.API.has_extended_resource_request_extension',
@@ -9704,9 +9757,11 @@ class TestNeutronPortSecurity(test.NoDBTestCase):
             instance, mock.ANY, [])
         mock_create_port.assert_has_calls([
             mock.call(
-                mock.sentinel.context, mock.ANY, instance, u'net1', None, []),
+                mock.sentinel.context, mock.ANY, instance, u'net1', None, [],
+                vnic_type=None),
             mock.call(
-                mock.sentinel.context, mock.ANY, instance, u'net2', None, [])],
+                mock.sentinel.context, mock.ANY, instance, u'net2', None, [],
+                vnic_type=None)],
             any_order=True)
 
     @mock.patch.object(neutronapi.API, 'get_instance_nw_info')
@@ -9758,10 +9813,12 @@ class TestNeutronPortSecurity(test.NoDBTestCase):
         mock_create_port.assert_has_calls([
             mock.call(
                 mock.sentinel.context, mock.ANY, instance, u'net1', None,
-                ['default-uuid', 'secgrp-uuid1', 'secgrp-uuid2']),
+                ['default-uuid', 'secgrp-uuid1', 'secgrp-uuid2'],
+                vnic_type=None),
             mock.call(
                 mock.sentinel.context, mock.ANY, instance, u'net2', None,
-                ['default-uuid', 'secgrp-uuid1', 'secgrp-uuid2'])],
+                ['default-uuid', 'secgrp-uuid1', 'secgrp-uuid2'],
+                vnic_type=None)],
             any_order=True)
 
     @mock.patch.object(neutronapi.API, 'get_instance_nw_info')
@@ -9812,9 +9869,11 @@ class TestNeutronPortSecurity(test.NoDBTestCase):
             instance, mock.ANY, [])
         mock_create_port.assert_has_calls([
             mock.call(
-                mock.sentinel.context, mock.ANY, instance, u'net1', None, []),
+                mock.sentinel.context, mock.ANY, instance, u'net1', None, [],
+                vnic_type=None),
             mock.call(
-                mock.sentinel.context, mock.ANY, instance, u'net2', None, [])],
+                mock.sentinel.context, mock.ANY, instance, u'net2', None, [],
+                vnic_type=None)],
             any_order=True)
 
     @mock.patch.object(neutronapi.API, 'get_instance_nw_info')
@@ -10070,6 +10129,7 @@ class TestAPIAutoAllocateNetwork(test.NoDBTestCase):
                 self.context, ntrn, instance, uuids.network_id,
                 None,   # request.address (fixed IP)
                 [],     # security_group_ids - we didn't request any
+                vnic_type=None,
             )
             update_port_mock.assert_called_once_with(
                 ntrn, instance, uuids.port_id, port_req_body)
