@@ -1,0 +1,5 @@
+---
+features:
+  - |
+    When deploing instance with trunks generate required
+    network_data for cloudinit.

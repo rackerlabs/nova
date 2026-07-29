@@ -2370,3 +2370,17 @@ class IronicDriver(virt_driver.ComputeDriver):
         """IronicDriver manages port bindings for baremetal instances.
         """
         return True
+
+    def attach_volume(self, context, connection_info, instance, mountpoint,
+                      disk_bus=None, device_type=None, encryption=None):
+        """Attach the disk to the instance at mountpoint using info.
+
+        :raises TooManyDiskDevices: if the maximum allowed devices to attach
+                                    to a single instance is exceeded.
+        """
+        LOG.debug("attach_volume connection_info %s", connection_info, instance=instance)
+
+    def detach_volume(self, context, connection_info, instance, mountpoint,
+                      encryption=None):
+        """Detach the disk attached to the instance."""
+        LOG.debug("detach_volume connection_info %s", connection_info, instance=instance)

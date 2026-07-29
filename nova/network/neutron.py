@@ -3402,13 +3402,17 @@ class API:
         preserve_on_delete = (current_neutron_port['id'] in
                               preexisting_port_ids)
 
+        vif_type = current_neutron_port.get('binding:vif_type')
+        if current_neutron_port.get('device_owner') == 'trunk:subport':
+            vif_type = network_model.VIF_TYPE_TRUNK_SUBPORT
+
         return network_model.VIF(
             id=current_neutron_port['id'],
             address=current_neutron_port['mac_address'],
             network=network,
             vnic_type=current_neutron_port.get('binding:vnic_type',
                                                network_model.VNIC_TYPE_NORMAL),
-            type=current_neutron_port.get('binding:vif_type'),
+            type=vif_type,
             profile=get_binding_profile(current_neutron_port),
             details=current_neutron_port.get('binding:vif_details'),
             ovs_interfaceid=ovs_interfaceid,
@@ -3436,6 +3440,20 @@ class API:
                 old_vnic_type,
                 instance=instance
             )
+
+    def _populate_trunk_info(self, vif, current_neutron_port, context, client):
+        trunk_details = current_neutron_port.get("trunk_details", {})
+        for subport in trunk_details.get("sub_ports", []):
+            port_id = subport["port_id"]
+            port = self._show_port(context, port_id,
+                                   neutron_client=client)
+            subport_network = client.show_network(
+                port['network_id'])['network']
+
+            subport_vif = self._build_vif_model(
+                    context, client, port, [subport_network],
+                    [port_id])
+            vif.add_trunk_vif(subport_vif)
 
     def _build_network_info_model(self, context, instance, networks=None,
                                   port_ids=None, admin_client=None,
@@ -3508,6 +3526,8 @@ class API:
                     refreshed_vif = self._build_vif_model(
                         context, client, current_neutron_port, networks,
                         preexisting_port_ids)
+                    self._populate_trunk_info(
+                        refreshed_vif, current_neutron_port, context, client)
                     for index, vif in enumerate(nw_info):
                         if vif['id'] == refresh_vif_id:
                             self._log_error_if_vnic_type_changed(
@@ -3581,7 +3601,12 @@ class API:
                             vif['vnic_type'],
                             instance,
                         )
+
+                self._populate_trunk_info(
+                    vif, current_neutron_port, context, client)
+
                 nw_info.append(vif)
+
             elif nw_info_refresh:
                 LOG.info('Port %s from network info_cache is no '
                          'longer associated with instance in Neutron. '
