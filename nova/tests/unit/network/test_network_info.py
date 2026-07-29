@@ -1081,6 +1081,38 @@ class TestNetworkMetadata(test.NoDBTestCase):
     def test_get_network_metadata_json_ipv6_addr_mode_stateless(self):
         self._test_get_network_metadata_json_ipv6_addr_mode('dhcpv6-stateless')
 
+    def test_get_network_metadata_json_trunks(self):
+
+        parent_vif = fake_network_cache_model.new_vif(
+            {'type': 'ovs', 'devname': 'interface0',
+             'trunk_vifs': [],
+             'id': 'parent1'
+            })
+        trunk_vif = fake_network_cache_model.new_vif(
+            {'type': 'trunk-subport', 'devname': 'interface0',
+             'trunk_vifs': [parent_vif],
+             'id': 'subport1',
+             'profile': {"tag": 1049,
+                         "parent_name": "parent1"}
+        })
+
+        netinfo = model.NetworkInfo([parent_vif, trunk_vif])
+
+        net_metadata = netutils.get_network_metadata(netinfo)
+
+        # IPv4 Network
+        self.assertIn({
+            'id': 'interface0',
+            'vif_id': 'subport1',
+            'type': 'vlan',
+            'mtu': None,
+            'ethernet_mac_address': 'aa:aa:aa:aa:aa:aa',
+            'vlan_link': 'interface0',
+            'vlan_id': 1049,
+            'vlan_mac_address': 'aa:aa:aa:aa:aa:aa'},
+            net_metadata['links']
+        )
+
     def test__get_nets(self):
         expected_net = {
             'id': 'network0',

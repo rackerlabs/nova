@@ -165,6 +165,12 @@ def get_injected_network_template(network_info, template=None,
                             'libvirt_virt_type': libvirt_virt_type})
 
 
+def get_vif_from_network_info(vif_id, network_info):
+    for vif in network_info:
+        if vif["id"] == vif_id:
+            return vif
+
+
 def get_network_metadata(network_info):
     """Gets a more complete representation of the instance network information.
 
@@ -186,9 +192,25 @@ def get_network_metadata(network_info):
     ifc_num = -1
     net_num = -1
 
+    trunk_vifs = []
     for vif in network_info:
+        for trunk_vif in vif['trunk_vifs']:
+            trunk_vifs.append(trunk_vif)
+
+    for vif in network_info + trunk_vifs:
         if not vif.get('network') or not vif['network'].get('subnets'):
             continue
+
+        parent_vif = None
+        if vif['type'] == 'trunk-subport':
+            vif_profile = vif.get("profile")
+            if not vif_profile:
+                continue
+            parent_vif_id = vif_profile.get("parent_name")
+            if not parent_vif_id:
+                continue
+            parent_vif = get_vif_from_network_info(parent_vif_id,
+                                                   network_info)
 
         network = vif['network']
         # NOTE(JoshNang) currently, only supports the first IPv4 and first
@@ -202,7 +224,7 @@ def get_network_metadata(network_info):
 
         # Get the VIF or physical NIC data
         if subnet_v4 or subnet_v6:
-            link = _get_eth_link(vif, ifc_num)
+            link = _get_eth_link(vif, ifc_num, parent_vif)
             links.append(link)
 
         # Add IPv4 and IPv6 networks if they exist
@@ -240,7 +262,7 @@ def get_ec2_ip_info(network_info):
     return ip_info
 
 
-def _get_eth_link(vif, ifc_num):
+def _get_eth_link(vif, ifc_num, parent_vif=None):
     """Get a VIF or physical NIC representation.
 
     :param vif: Neutron VIF
@@ -256,6 +278,8 @@ def _get_eth_link(vif, ifc_num):
     # Use 'phy' for physical links. Ethernet can be confusing
     if vif.get('type') in model.LEGACY_EXPOSED_VIF_TYPES:
         nic_type = vif.get('type')
+    elif vif.get('type') == model.VIF_TYPE_TRUNK_SUBPORT:
+        nic_type = 'vlan'
     else:
         nic_type = 'phy'
 
@@ -266,6 +290,15 @@ def _get_eth_link(vif, ifc_num):
         'mtu': _get_link_mtu(vif),
         'ethernet_mac_address': vif.get('address'),
     }
+
+    if nic_type == "vlan":
+        link.update({
+            "vif_id": vif["id"],
+            "vlan_link": parent_vif['devname'],
+            "vlan_id": vif["profile"]["tag"],
+            "vlan_mac_address": vif["address"],
+        })
+
     return link
 
 
