@@ -518,7 +518,7 @@ class VIF(Model):
     @classmethod
     def hydrate(cls, vif):
         vif = cls(**vif)
-        vif['trunk_vifs'] = [VIF.hydrate(**trunk_vif) for trunk_vif
+        vif['trunk_vifs'] = [VIF.hydrate(trunk_vif) for trunk_vif
                              in vif.get('trunk_vifs', [])]
         vif['network'] = Network.hydrate(vif['network'])
         return vif
