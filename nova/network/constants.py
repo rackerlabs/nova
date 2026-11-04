@@ -13,6 +13,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# NOTE: Neutron client has a max URL length of 8192, so we have
+# to limit the number of IDs we include in any single search.  Really
+# doesn't seem to be any point in making this a config value.
+MAX_SEARCH_IDS = 150
+
 # Port fields
 
 BINDING_PROFILE = 'binding:profile'

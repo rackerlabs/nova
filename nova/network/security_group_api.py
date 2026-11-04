@@ -32,16 +32,12 @@ from webob import exc
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
+from nova.network import constants
 from nova.network import neutron as neutronapi
 from nova.objects import security_group as security_group_obj
 
 
 LOG = logging.getLogger(__name__)
-
-# NOTE: Neutron client has a max URL length of 8192, so we have
-# to limit the number of IDs we include in any single search.  Really
-# doesn't seem to be any point in making this a config value.
-MAX_SEARCH_IDS = 150
 
 
 def validate_id(id):
@@ -471,7 +467,7 @@ def _get_ports_from_server_list(servers, neutron):
     # Note: Have to split the query up as the search criteria
     # form part of the URL, which has a fixed max size
     ports = []
-    for ids in _chunk_by_ids(servers, MAX_SEARCH_IDS):
+    for ids in _chunk_by_ids(servers, constants.MAX_SEARCH_IDS):
         search_opts = {'device_id': ids}
         try:
             ports.extend(neutron.list_ports(
@@ -507,7 +503,7 @@ def _get_secgroups_from_port_list(ports, neutron, fields=None):
     # Note: Have to split the query up as the search criteria
     # form part of the URL, which has a fixed max size
     security_groups = {}
-    for sg_id_list in _chunk_by_ids(sg_ids, MAX_SEARCH_IDS):
+    for sg_id_list in _chunk_by_ids(sg_ids, constants.MAX_SEARCH_IDS):
         sg_search_opts = {'id': sg_id_list}
         if fields:
             sg_search_opts['fields'] = fields
